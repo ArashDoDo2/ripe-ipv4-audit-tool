@@ -4,7 +4,7 @@
 
 **`ripe-ipv4-audit-tool`** is a fast, concurrent Python CLI utility designed to audit large IPv4 address allocations registered under a specific RIPE **ORG-ID**.
 
-The tool queries RIPE RDAP to retrieve all assigned CIDR blocks and then uses **RIPEstat's Routing Status API** to determine which individual `/24` subnets are currently **Candidate Free** (i.e., not actively advertised in the global BGP routing table) and therefore potentially available for use.
+The tool queries **RIPE RDAP** to retrieve all assigned CIDR blocks and then uses **RIPEstat's Routing Status API** to determine which individual `/24` subnets are currently **Candidate Free** (i.e., not actively advertised in the global BGP routing table) and therefore potentially available for use.
 
 This tool is invaluable for LIRs managing large address space and needing to quickly identify unused or "dark" space for reassignment.
 
@@ -18,9 +18,15 @@ This tool is invaluable for LIRs managing large address space and needing to qui
 * **Detailed Summary:** Provides registration dates and allocation lists directly from RDAP in the console.
 * **CSV Output:** Exports detailed results to a structured CSV file.
 
-## 📥 Installation
+---
 
-This tool requires Python 3.8+ and the following libraries:
+## 🚀 Usage (نحوه استفاده)
+
+Run the script directly and provide the required `ORG-ID` either interactively or as a command-line argument.
+
+### ۱. Basic Execution (Interactive)
+
+The script will prompt you to enter the ORG-ID:
 
 ```bash
-pip install requests
+python check_free_24s_org_id_cli_v28.py
