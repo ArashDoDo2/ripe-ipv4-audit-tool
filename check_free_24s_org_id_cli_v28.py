@@ -13,6 +13,7 @@ Improvements over V27:
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import argparse
+import contextlib
 import ipaddress
 import requests
 import csv
@@ -373,173 +374,170 @@ def main():
     global_retry_delay = args.retry_delay
     global_throttle = args.throttle
 
-    session = make_session()
-    global_session = session
-    max_workers = max(1, args.max_workers)
-    semaphore = Semaphore(max_workers)
-    global_semaphore = semaphore
+    with make_session() as session:
+        global_session = session
+        max_workers = max(1, args.max_workers)
+        semaphore = Semaphore(max_workers)
+        global_semaphore = semaphore
 
-    print(f"\n=======================================================", file=sys.stderr)
-    print(f"=== حسابرسی آدرس‌های IPv4 (نسخه ۲۸) - ORG: {org_id} ===", file=sys.stderr)
-    print(f"=======================================================\n", file=sys.stderr)
+        print(f"\n=======================================================", file=sys.stderr)
+        print(f"=== حسابرسی آدرس‌های IPv4 (نسخه ۲۸) - ORG: {org_id} ===", file=sys.stderr)
+        print(f"=======================================================\n", file=sys.stderr)
 
-    # 1. Get ALLOCATIONS from RDAP
-    allocations = rdap_get_ipv4_from_org(session, org_id, DEFAULT_REQUEST_TIMEOUT, global_retries, global_retry_delay)
-    if not allocations:
-        logger.error(f"Could not retrieve any IPv4 ranges for ORG-ID {org_id}. Exiting.")
-        sys.exit(1)
-
-    logger.debug(f"Retrieved {len(allocations)} top-level allocations for {org_id}.")
-
-    # 2. Display Allocation Summary
-    print("## 🌐 خلاصه واگذاری‌های اصلی (RDAP)", file=sys.stderr)
-    print("-------------------------------------------------------", file=sys.stderr)
-
-    registration_date = extract_date_from_events(global_rdap_data, "registration")
-    last_changed_date = extract_date_from_events(global_rdap_data, "last changed")
-
-    print(f"* واگذاری اولیه ORG-ID: **{registration_date if registration_date else 'نامشخص'}**", file=sys.stderr)
-    print(f"* آخرین تغییر ثبت ORG-ID: **{last_changed_date if last_changed_date else 'نامشخص'}**", file=sys.stderr)
-    print(f"* تعداد بلاک‌های واگذار شده: **{len(allocations)}**", file=sys.stderr)
-
-    formatted_list_lines = format_allocation_list_v27(allocations)
-    print(f"* لیست بلاک‌ها (CIDR و تاریخ واگذاری اولیه):", file=sys.stderr)
-
-    for line in formatted_list_lines:
-        print(f"  {line}", file=sys.stderr)
-
-    print("-" * 55 + "\n", file=sys.stderr)
-
-    # 3. Map /24s and Prepare for Audit
-    map_24s_to_allocations(allocations)
-    subnets = generate_all_24s(allocations)
-    logger.debug(f"Mapped {len(ALLOCATION_MAP)} /24 subnets. Expanding to {len(subnets)} total /24 subnets.")
-
-    free_24s_list: List[str] = []
-    free_24_last_seen: Dict[str, str] = {}
-
-    logger.info("Starting RIPEstat concurrent audit...")
-    start_time = time.time()
-
-    # V28: Worker creation no longer needs my_asn
-    worker = make_worker(session, DEFAULT_REQUEST_TIMEOUT, global_retries, global_retry_delay, args.throttle, semaphore)
-
-    try:
-        with ThreadPoolExecutor(max_workers=max_workers) as exe:
-            futures = {exe.submit(worker, p): p for p in subnets}
-            total_subnets = len(subnets)
-            processed_count = 0
-            for fut in as_completed(futures):
-                processed_count += 1
-                if processed_count % 50 == 0:
-                    logger.debug(f"Progress: {processed_count}/{total_subnets} processed.")
-                try:
-                    # V28: worker result format is now different (only 4 elements)
-                    prefix, status, notes, best_last_seen_time = fut.result()
-                except KeyboardInterrupt:
-                    logger.error("Interrupted by کاربر. Attempting to shut down workers.")
-                    raise
-                except Exception as e:
-                    logger.warning(f"Worker error for {futures[fut]}: {e}")
-                    continue
-
-                if status == "candidate_free":
-                    free_24s_list.append(prefix)
-                    if best_last_seen_time:
-                        free_24_last_seen[prefix] = best_last_seen_time
-    except KeyboardInterrupt:
-        logger.error("Interrupted by کاربر. Exiting.")
-        sys.exit(1)
-
-    elapsed = time.time() - start_time
-    logger.info(f"Audit completed in {elapsed:.2f} seconds. Found {len(free_24s_list)} candidate-free /24s.")
-
-    if not free_24s_list:
-        logger.info("No candidate-free blocks found. Exiting.")
-        sys.exit(0)
-
-    aggregated_blocks = aggregate_cidrs(free_24s_list)
-
-    # 4. Final Output to CSV (stdout or file)
-    out_f = sys.stdout
-    if args.output:
-        try:
-            out_f = open(args.output, "w", newline="", encoding="utf-8")
-        except IOError as e:
-            logger.error(f"Failed to open output file {args.output}: {e}")
+        # 1. Get ALLOCATIONS from RDAP
+        allocations = rdap_get_ipv4_from_org(session, org_id, DEFAULT_REQUEST_TIMEOUT, global_retries, global_retry_delay)
+        if not allocations:
+            logger.error(f"Could not retrieve any IPv4 ranges for ORG-ID {org_id}. Exiting.")
             sys.exit(1)
 
-    writer = csv.writer(out_f, quoting=csv.QUOTE_MINIMAL)
-    writer.writerow(["Aggregated_Free_Block", "Max_Last_Seen_Date", "Last_Seen_Details"])
+        logger.debug(f"Retrieved {len(allocations)} top-level allocations for {org_id}.")
 
-    total_free_ips = 0
+        # 2. Display Allocation Summary
+        print("## 🌐 خلاصه واگذاری‌های اصلی (RDAP)", file=sys.stderr)
+        print("-------------------------------------------------------", file=sys.stderr)
 
-    for block in aggregated_blocks:
+        registration_date = extract_date_from_events(global_rdap_data, "registration")
+        last_changed_date = extract_date_from_events(global_rdap_data, "last changed")
+
+        print(f"* واگذاری اولیه ORG-ID: **{registration_date if registration_date else 'نامشخص'}**", file=sys.stderr)
+        print(f"* آخرین تغییر ثبت ORG-ID: **{last_changed_date if last_changed_date else 'نامشخص'}**", file=sys.stderr)
+        print(f"* تعداد بلاک‌های واگذار شده: **{len(allocations)}**", file=sys.stderr)
+
+        formatted_list_lines = format_allocation_list_v27(allocations)
+        print(f"* لیست بلاک‌ها (CIDR و تاریخ واگذاری اولیه):", file=sys.stderr)
+
+        for line in formatted_list_lines:
+            print(f"  {line}", file=sys.stderr)
+
+        print("-" * 55 + "\n", file=sys.stderr)
+
+        # 3. Map /24s and Prepare for Audit
+        map_24s_to_allocations(allocations)
+        subnets = generate_all_24s(allocations)
+        logger.debug(f"Mapped {len(ALLOCATION_MAP)} /24 subnets. Expanding to {len(subnets)} total /24 subnets.")
+
+        free_24s_list: List[str] = []
+        free_24_last_seen: Dict[str, str] = {}
+
+        logger.info("Starting RIPEstat concurrent audit...")
+        start_time = time.time()
+
+        # V28: Worker creation no longer needs my_asn
+        worker = make_worker(session, DEFAULT_REQUEST_TIMEOUT, global_retries, global_retry_delay, args.throttle, semaphore)
+
         try:
-            net = ipaddress.ip_network(block, strict=False)
-            ip_count = net.num_addresses
-        except Exception:
-            ip_count = 0
+            with ThreadPoolExecutor(max_workers=max_workers) as exe:
+                futures = {exe.submit(worker, p): p for p in subnets}
+                total_subnets = len(subnets)
+                processed_count = 0
+                for fut in as_completed(futures):
+                    processed_count += 1
+                    if processed_count % 50 == 0:
+                        logger.debug(f"Progress: {processed_count}/{total_subnets} processed.")
+                    try:
+                        # V28: worker result format is now different (only 4 elements)
+                        prefix, status, notes, best_last_seen_time = fut.result()
+                    except KeyboardInterrupt:
+                        logger.error("Interrupted by کاربر. Attempting to shut down workers.")
+                        raise
+                    except Exception as e:
+                        logger.warning(f"Worker error for {futures[fut]}: {e}")
+                        continue
 
-        simple_output = f"{block} ({ip_count})"
-        sub_24s = [str(s) for s in net.subnets(new_prefix=24)]
-        total_free_ips += ip_count
+                    if status == "candidate_free":
+                        free_24s_list.append(prefix)
+                        if best_last_seen_time:
+                            free_24_last_seen[prefix] = best_last_seen_time
+        except KeyboardInterrupt:
+            logger.error("Interrupted by کاربر. Exiting.")
+            sys.exit(1)
 
-        # --- Aggregation logic (Unchanged) ---
-        grouped_24s: Dict[Optional[str], List[ipaddress.IPv4Network]] = {}
-        all_dates_in_block = []
-        allocation_boundary_len = ALLOCATION_MAP.get(sub_24s[0],
-                                                     DEFAULT_ALLOC_FALLBACK) if sub_24s else DEFAULT_ALLOC_FALLBACK
+        elapsed = time.time() - start_time
+        logger.info(f"Audit completed in {elapsed:.2f} seconds. Found {len(free_24s_list)} candidate-free /24s.")
 
-        for sub_24 in sub_24s:
-            if sub_24 in free_24_last_seen:
-                last_seen_date = get_date_only(free_24_last_seen[sub_24])
-                if last_seen_date:
-                    all_dates_in_block.append(last_seen_date)
-                group_key = last_seen_date
-                grouped_24s.setdefault(group_key, []).append(ipaddress.ip_network(sub_24))
+        if not free_24s_list:
+            logger.info("No candidate-free blocks found. Exiting.")
+            sys.exit(0)
 
-        max_last_seen_date = "N/A"
-        if all_dates_in_block:
-            max_last_seen_date = sorted(all_dates_in_block)[-1]
+        aggregated_blocks = aggregate_cidrs(free_24s_list)
 
-        last_seen_details = "No routing data found."
+        # 4. Final Output to CSV (stdout or file)
+        with contextlib.ExitStack() as stack:
+            out_f = sys.stdout
+            if args.output:
+                try:
+                    out_f = stack.enter_context(open(args.output, "w", newline="", encoding="utf-8"))
+                except IOError as e:
+                    logger.error(f"Failed to open output file {args.output}: {e}")
+                    sys.exit(1)
 
-        if grouped_24s:
-            header = f"Alloc Boundary /{allocation_boundary_len}"
-            is_single_group = len(grouped_24s) == 1
-            if is_single_group:
-                date = next(iter(grouped_24s.keys()))
-                date_label = f"Date: {date}" if date else "Date: N/A"
-                if net.prefixlen == 24:
-                    last_seen_details = f"{header}: {date_label}"
-                else:
-                    last_seen_details = f"{header}: All /24s ({date_label})"
-            else:
-                partial_entries = []
-                for date, net_list in grouped_24s.items():
-                    aggregated_partials = list(ipaddress.collapse_addresses(net_list))
-                    partial_blocks_str = ", ".join(str(p) for p in aggregated_partials)
-                    date_label = f"(Date: {date})" if date else "(Date: N/A)"
-                    entry = f"{partial_blocks_str} {date_label}"
-                    partial_entries.append(entry)
-                entries_str = " | ".join(partial_entries)
-                last_seen_details = f"{header}: {entries_str}"
-        # --- End Aggregation Logic ---
+            writer = csv.writer(out_f, quoting=csv.QUOTE_MINIMAL)
+            writer.writerow(["Aggregated_Free_Block", "Max_Last_Seen_Date", "Last_Seen_Details"])
 
-        writer.writerow([simple_output, max_last_seen_date, last_seen_details])
-        if args.output:
-            out_f.flush()
+            total_free_ips = 0
 
-    if args.output and out_f is not sys.stdout:
-        out_f.close()
+            for block in aggregated_blocks:
+                try:
+                    net = ipaddress.ip_network(block, strict=False)
+                except ValueError:
+                    logger.warning(f"Skipping invalid aggregated block '{block}' in output.")
+                    continue
 
-    # 5. Final Summary
-    print("\n## 📊 خلاصه نهایی نتایج", file=sys.stderr)
-    print("-------------------------------------------------------", file=sys.stderr)
-    print(f"* تعداد بلاک‌های تجمیع شده نامزد آزاد: **{len(aggregated_blocks)}**", file=sys.stderr)
-    print(f"* مجموع آدرس‌های IP نامزد آزاد (Candidate Free): **{total_free_ips}**", file=sys.stderr)
-    print("=======================================================\n", file=sys.stderr)
+                ip_count = net.num_addresses
+                simple_output = f"{block} ({ip_count})"
+                sub_24s = [str(s) for s in net.subnets(new_prefix=24)]
+                total_free_ips += ip_count
+
+                # --- Aggregation logic (Unchanged) ---
+                grouped_24s: Dict[Optional[str], List[ipaddress.IPv4Network]] = {}
+                all_dates_in_block = []
+                allocation_boundary_len = ALLOCATION_MAP.get(sub_24s[0],
+                                                             DEFAULT_ALLOC_FALLBACK) if sub_24s else DEFAULT_ALLOC_FALLBACK
+
+                for sub_24 in sub_24s:
+                    if sub_24 in free_24_last_seen:
+                        last_seen_date = get_date_only(free_24_last_seen[sub_24])
+                        if last_seen_date:
+                            all_dates_in_block.append(last_seen_date)
+                        group_key = last_seen_date
+                        grouped_24s.setdefault(group_key, []).append(ipaddress.ip_network(sub_24))
+
+                max_last_seen_date = "N/A"
+                if all_dates_in_block:
+                    max_last_seen_date = sorted(all_dates_in_block)[-1]
+
+                last_seen_details = "No routing data found."
+
+                if grouped_24s:
+                    header = f"Alloc Boundary /{allocation_boundary_len}"
+                    is_single_group = len(grouped_24s) == 1
+                    if is_single_group:
+                        date = next(iter(grouped_24s.keys()))
+                        date_label = f"Date: {date}" if date else "Date: N/A"
+                        if net.prefixlen == 24:
+                            last_seen_details = f"{header}: {date_label}"
+                        else:
+                            last_seen_details = f"{header}: All /24s ({date_label})"
+                    else:
+                        partial_entries = []
+                        for date, net_list in grouped_24s.items():
+                            aggregated_partials = list(ipaddress.collapse_addresses(net_list))
+                            partial_blocks_str = ", ".join(str(p) for p in aggregated_partials)
+                            date_label = f"(Date: {date})" if date else "(Date: N/A)"
+                            entry = f"{partial_blocks_str} {date_label}"
+                            partial_entries.append(entry)
+                        entries_str = " | ".join(partial_entries)
+                        last_seen_details = f"{header}: {entries_str}"
+                # --- End Aggregation Logic ---
+
+                writer.writerow([simple_output, max_last_seen_date, last_seen_details])
+
+        # 5. Final Summary
+        print("\n## 📊 خلاصه نهایی نتایج", file=sys.stderr)
+        print("-------------------------------------------------------", file=sys.stderr)
+        print(f"* تعداد بلاک‌های تجمیع شده نامزد آزاد: **{len(aggregated_blocks)}**", file=sys.stderr)
+        print(f"* مجموع آدرس‌های IP نامزد آزاد (Candidate Free): **{total_free_ips}**", file=sys.stderr)
+        print("=======================================================\n", file=sys.stderr)
 
     return 0
 
